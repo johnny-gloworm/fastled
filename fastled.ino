@@ -1,204 +1,174 @@
-#define FASTLED_INTERRUPT_RETRY_COUNT 0 
+#define FASTLED_INTERRUPT_RETRY_COUNT 0
 #include "FastLED.h"
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include "credentials.h"
+
+// credentials.h provide these definitions:
+// #define WIFI_SSID "xxx"
+// #define WIFI_PASSWORD "yyy"
+// #define AQI_TOKEN "zzz"
 
 #define NUM_LEDS 50
 #define DATA_PIN 3
 
-#define MIN_INTERVAL 1000
-#define MAX_INTERVAL 10000
-#define MIN_ERA_CYCLES 2
-#define MAX_ERA_CYCLES 3
-#define ERA_COUNT 8
+#define REQUEST_STATE_INITIAL 0
+#define REQUEST_STATE_JUST_SENT 1
+#define REQUEST_STATE_GOT_DATA 2
 
-long minLightInterval = 0;
-long maxLightInterval = 0;
-long minDarkInterval = 0;
-long maxDarkInterval = 0;
-long eraInterval = 0;
-long eraIndex = -1;
-float minHue = 0.0f;
-float maxHue = 6.0f;
-bool acceptHue( float hue )
-{
-    if ( eraIndex == 0 )
-    {
-        return hue >= 5.75f || hue <= 0.25f;
-    }
-    else if ( eraIndex == 1 )
-    {
-        return hue >= 3.75f && hue <= 4.25f;
-    }
-    else if ( eraIndex == 2 )
-    {
-        return hue >= 1.75f && hue <= 2.25f;
-    }
-    else if ( eraIndex == 3 )
-    {
-        return hue >= 0.75f && hue <= 1.25f;
-    }
-    else 
-    {
-        return hue >= 0.75f && hue <= 1.0f ||
-            hue >= 3.75f && hue <= 4.00f;
-    }
-    return true;
-}
 
-float minBrightness = 0.1f;
-float maxBrightness = 0.8f;
-
+HTTPClient http;
 CRGB leds[NUM_LEDS];
-int interval[NUM_LEDS];
-float phase[NUM_LEDS];
-float caps[NUM_LEDS];
-float hue[NUM_LEDS];
+long aqis[NUM_LEDS];
 
-long lastMillis;;
-long lastEraMillis;
+long stations[] =
+{
+    245,    // LA
+    6323,   // Denver
+    6298,   // Miami
+    7377,   // WV
+    5102,   // Buffalo
+    7949,   // London
+    6037,   // Munich
+    9439,   // Rome
+    6132,   // Berlin
+    3399,   // Marszalkowska
+    4143,   // Istanbul
+    3782,   // Abu Dhabi
+    7020,   // Mumbai
+    9473,   // Chiang Mai
+    1857,   // Bangkok
+    1666,   // Singapore
+    3305,   // Guangzhou
+    3303,   // Beijing
+    4487,   // Seoul
+    2413,   // Tokyo
+    9303,   // Auckland
+};
+
+struct ColorStop
+{
+    long stop;
+    CRGB color;
+};
+
+ColorStop colorStops[] =
+{
+    { 0, CRGB( 0, 255, 0 ) },
+    { 50, CRGB( 255, 255, 0) },
+    { 100, CRGB( 255, 128, 0 ) },
+    { 150, CRGB( 255, 0 ,0 ) },
+    { 200, CRGB( 128, 0, 128 ) },
+    { 300, CRGB( 128, 0, 0 ) }
+};
+
+struct RequestState
+{
+    int currentId;
+    int state;
+} requestState;
 
 
-void setup() 
-{ 
-    Serial.begin(115200); 
-    randomSeed( analogRead( 0 ) );
+
+void setup()
+{
+    Serial.begin(115200);
+    WiFi.begin( WIFI_SSID, WIFI_PASSWORD );
+
     FastLED.addLeds<WS2811, DATA_PIN, RGB>(leds, NUM_LEDS);
     for ( int i = 0; i < NUM_LEDS; i++ )
     {
-        newCycle( i );
+        aqis[ i ] = -1;
     }
-    lastMillis = lastEraMillis = millis();
-    newEra();
-}
+    showLeds();
 
-void newEra()
-{
-    lastEraMillis = lastMillis;
-    minLightInterval = random( MIN_INTERVAL, MAX_INTERVAL );
-    maxLightInterval = minLightInterval + random( MIN_INTERVAL, MAX_INTERVAL );
-    minDarkInterval = random( MIN_INTERVAL, MAX_INTERVAL );
-    maxDarkInterval = minDarkInterval + random( MIN_INTERVAL, MAX_INTERVAL );
-    eraInterval = random( MIN_ERA_CYCLES, MAX_ERA_CYCLES ) * MAX_INTERVAL;
-    eraIndex = ( eraIndex + 1 ) % ERA_COUNT;
-}
+    while ( WiFi.status() != WL_CONNECTED )
+    {
+        delay( 1000 );
+        Serial.println( "Connecting..." );
+    }
+    Serial.println( "Connected!" );
 
-void newCycle( int ledId )
-{
-    interval[ ledId ] = random( minLightInterval, maxLightInterval );
-
-    while ( true )
-    {
-        hue[ ledId ] = minHue + (float)random( 0, 
-            (long)( 10000.0f * ( maxHue - minHue ) ) ) / 10000.0f;
-        if ( acceptHue( hue[ ledId ] ) ) break;
-    }
-
-    while ( hue[ ledId ] < 0.0f ) hue[ ledId ] += 6.0f;
-    while ( hue[ ledId ] > 6.0f ) hue[ ledId ] -= 6.0f;
-
-    phase[ ledId ] = -random( minDarkInterval, maxDarkInterval );
-    caps[ ledId ] = minBrightness + random( 0, (int)( 
-        10000 * ( maxBrightness - minBrightness ) ) ) / 10000.0f;
-    Serial.print( String( eraIndex ) );
-    Serial.print( ", " );
-    Serial.println( String( hue[ ledId ] ) );
-}
-
-void advance( int ledId, long dt )
-{
-    long thisPhase = ( phase[ ledId ] += dt );
-    if ( thisPhase > interval[ ledId ] )
-    {
-        newCycle( ledId );
-    }
-    thisPhase = phase[ ledId ];
-
-    int r, g, b;
-    float thisHue = hue[ ledId ];
-    if ( thisHue < 1.0f )
-    {
-        r = 255;
-        g = (int)( 255 * thisHue );
-        b = 0;
-    }
-    else if ( thisHue < 2.0f )
-    {
-        r = (int)( 255 * ( 2.0f - thisHue ) );
-        g = 255;
-        b = 0;
-    }
-    else if ( thisHue < 3.0f )
-    {
-        r = 0;
-        g = 255;
-        b = (int)( 255 * ( thisHue - 2.0f ) );
-    }
-    else if ( thisHue < 4.0f )
-    {
-        r = 0;
-        g = (int)( 255 * ( 4.0f - thisHue ) );
-        b = 255;
-    }
-    else if ( thisHue < 5.0f )
-    {
-        r = (int)( 255 * ( thisHue - 4.0f ) );
-        g = 0;
-        b = 255;
-    }
-    else
-    {
-        r = 255;
-        g = 0;
-        b = (int)( 255 * ( 6.0f - thisHue ) );
-    }
-
-    float intensity = thisPhase < 0 ? 0.0f : 
-        sin( (float)thisPhase / (float)interval[ ledId ] * 3.14 );
-    intensity *= caps[ ledId ];
-
-    if ( ledId == 0 )
-    {
-        // Serial.println( String( eraIndex ) );
-        // Serial.print( ", " );
-        // Serial.println( String( caps[ ledId ] ) );
-    }
-
-    if ( intensity < 0.5 )
-    {
-        r = (int)( r * intensity * 2 );
-        g = (int)( g * intensity * 2 );
-        b = (int)( b * intensity * 2 );
-    }
-    else 
-    {
-        r = 255 - (int)( ( 255 - r ) * ( 1.0f - ( intensity - 0.5f ) * 2 ) );
-        g = 255 - (int)( ( 255 - g ) * ( 1.0f - ( intensity - 0.5f ) * 2 ) );
-        b = 255 - (int)( ( 255 - b ) * ( 1.0f - ( intensity - 0.5f ) * 2 ) );
-    }
-
-    if ( r < 0 ) r = 0;
-    if ( g < 0 ) g = 0;
-    if ( b < 0 ) b = 0;
-    if ( r > 255 ) r = 255;
-    if ( g > 255 ) g = 255;
-    if ( b > 255 ) b = 255;
-    
-    leds[ ledId ].r = r;
-    leds[ ledId ].g = g;
-    leds[ ledId ].b = b;
+    randomSeed( analogRead( 0 ) );
 }
 
 void loop()
-{ 
-    long now = millis();
-    long dt = now - lastMillis;
-    lastMillis = now;
-    if ( now - lastEraMillis > eraInterval ) newEra();
+{
+    processHttp();
+    showLeds();
+    delay( requestState.currentId == 0 ? 10000 : 0 );
+}
 
-    for ( int i = 0; i < NUM_LEDS; i++ )
+void showLeds()
+{
+    int stationCount = sizeof ( stations ) / sizeof ( long );
+    for ( int i = 0; i < stationCount; i++ )
     {
-        advance( i, dt );
+        leds[ i ] = aqis[ i ] < 0 ?
+            CRGB( 0, 0, 0 ) : getColor( aqis[ i ], colorStops );
+        // Serial.print( i );
+        // Serial.print( ": " );
+        // Serial.print( aqis[ i ] );
+        // Serial.print( ": " );
+        // Serial.print( leds[ i ].r );
+        // Serial.print( "," );
+        // Serial.print( leds[ i ].g );
+        // Serial.print( "," );
+        // Serial.println( leds[ i ].b );
     }
-
     FastLED.show();
-    delay( 16 );
+};
+
+void processHttp()
+{
+    int stationId = stations[ requestState.currentId ];
+
+    Serial.print( "Fetching data for station #" );
+    Serial.println( stationId );
+    String url =
+        String( "http://api.waqi.info/feed/@" ) +
+        String( stationId ) +
+        String( "/?token=" ) +
+        String( AQI_TOKEN );
+    http.begin( url );
+    Serial.println( url );
+
+    int httpCode = http.GET();
+    if ( httpCode > 0 )
+    {
+        String payload = http.getString();
+        int startIndex = payload.indexOf( "\"aqi\":" );
+        int endIndex = payload.indexOf( ",", startIndex + 6 );
+        String substr = payload.substring( startIndex + 6, endIndex );
+        aqis[ requestState.currentId ] = substr == "\"-\"" ? -1 : substr.toInt();
+        Serial.println( substr );
+    }
+    else
+    {
+        Serial.println( "error" );
+    }
+    http.end();
+
+    requestState.currentId = ( requestState.currentId + 1 ) %
+        ( sizeof ( stations ) / sizeof ( long ) );
+}
+
+CRGB getColor( long value, ColorStop* stops )
+{
+    if ( value <= stops[ 0 ].stop ) return stops[ 0 ].color;
+    int stopCount = sizeof ( colorStops ) / sizeof( ColorStop );
+
+    for ( int i = 1; i < stopCount; i++ )
+    {
+        if ( value <= stops[ i ].stop )
+        {
+            float fraction = (float)( value - stops[ i - 1 ].stop ) /
+                (float)( stops[ i ].stop - stops[ i - 1 ].stop );
+            int r = (int)( fraction * stops[ i ].color.r + ( 1.0f - fraction ) * stops[ i - 1 ].color.r );
+            int g = (int)( fraction * stops[ i ].color.g + ( 1.0f - fraction ) * stops[ i - 1 ].color.g );
+            int b = (int)( fraction * stops[ i ].color.b + ( 1.0f - fraction ) * stops[ i - 1 ].color.b );
+            return CRGB( r, g, b );
+        }
+    }
+    return stops[ stopCount - 1 ].color;
 }
