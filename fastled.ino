@@ -20,6 +20,7 @@
 HTTPClient http;
 CRGB leds[NUM_LEDS];
 long aqis[NUM_LEDS];
+long aqi = 0;
 
 long stations[] =
 {
@@ -94,9 +95,20 @@ void setup()
 
 void loop()
 {
-    processHttp();
+    aqi++;
+    if ( aqi == 300 ) aqi = 0;
+
+    for ( int i = 0; i < NUM_LEDS; i++ )
+    {
+        aqis[ i ] = aqi;
+    }
+
+    delay( 200 );
+    Serial.println( aqi );
+
+    // processHttp();
     showLeds();
-    delay( requestState.currentId == 0 ? 10000 : 0 );
+    // delay( requestState.currentId == 0 ? 10000 : 0 );
 }
 
 void showLeds()
